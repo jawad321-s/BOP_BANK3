@@ -1,0 +1,40 @@
+# Local development stack. NOT for production.
+#   docker compose -f infra/docker-compose.yml up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: bitaqati
+      POSTGRES_PASSWORD: bitaqati
+      POSTGRES_DB: bitaqati_dev
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bitaqati"]
+      interval: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  mailpit:
+    # Captures all development email (never delivers to real inboxes). UI: http://localhost:8025
+    image: axllent/mailpit:latest
+    ports: ["1025:1025", "8025:8025"]
+  minio:
+    # S3-compatible private object storage for development. Console: http://localhost:9001
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: bitaqati
+      MINIO_ROOT_PASSWORD: bitaqati-dev-secret
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [miniodata:/data]
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: >
+      /bin/sh -c "sleep 3; mc alias set local http://minio:9000 bitaqati bitaqati-dev-secret &&
+      mc mb -p local/bitaqati-dev && mc anonymous set none local/bitaqati-dev; exit 0"
+volumes:
+  pgdata:
+  miniodata:

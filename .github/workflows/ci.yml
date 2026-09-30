@@ -1,0 +1,62 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bitaqati
+          POSTGRES_PASSWORD: bitaqati
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bitaqati" --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    env:
+      TEST_DATABASE_ADMIN_URL: postgresql://bitaqati:bitaqati@localhost:5432/postgres
+      DATABASE_URL: postgresql://bitaqati:bitaqati@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+      - name: Dependency audit (high+)
+        run: pnpm audit --prod --audit-level high
+        continue-on-error: true   # reported; triage in PR (see docs/operations.md)
+      - run: pnpm --filter @bitaqati/shared build
+      - run: pnpm --filter @bitaqati/api exec prisma generate
+      - name: Typecheck
+        run: pnpm -r typecheck
+      - name: Migrations apply to an empty database
+        run: |
+          psql postgresql://bitaqati:bitaqati@localhost:5432/postgres -c 'CREATE DATABASE ci_migrate'
+          DATABASE_URL=postgresql://bitaqati:bitaqati@localhost:5432/ci_migrate pnpm --filter @bitaqati/api exec prisma migrate deploy
+          DATABASE_URL=postgresql://bitaqati:bitaqati@localhost:5432/ci_migrate pnpm --filter @bitaqati/api exec prisma migrate status
+      - name: Unit + integration tests (real PostgreSQL)
+        run: |
+          pnpm --filter @bitaqati/shared test
+          pnpm --filter @bitaqati/api test
+          pnpm --filter @bitaqati/admin test
+          pnpm --filter @bitaqati/mobile test
+      - name: Build
+        run: |
+          pnpm --filter @bitaqati/api build
+          pnpm --filter @bitaqati/admin build
+      - name: Mobile JS bundle (iOS)
+        run: pnpm --filter @bitaqati/mobile bundle:check
+      - name: Full-stack E2E
+        run: |
+          pnpm --filter @bitaqati/e2e exec playwright install --with-deps chromium
+          pnpm --filter @bitaqati/e2e e2e
