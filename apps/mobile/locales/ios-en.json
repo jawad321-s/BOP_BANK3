@@ -1,0 +1,7 @@
+{
+  "CFBundleDisplayName": "Bitaqati",
+  "NSCameraUsageDescription": "The camera is used to scan a customer's card when recording a discount, and to take your card photo.",
+  "NSPhotoLibraryUsageDescription": "To choose your card photo.",
+  "NSLocationWhenInUseUsageDescription": "Used only when you ask to see nearby stores.",
+  "NSFaceIDUsageDescription": "To lock your card display if you enable it."
+}

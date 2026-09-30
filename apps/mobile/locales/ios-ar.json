@@ -1,0 +1,7 @@
+{
+  "CFBundleDisplayName": "بطاقتي",
+  "NSCameraUsageDescription": "تُستخدم الكاميرا لمسح رمز بطاقة العميل عند تسجيل الخصم، ولالتقاط صورتك الشخصية للبطاقة.",
+  "NSPhotoLibraryUsageDescription": "لاختيار صورتك الشخصية للبطاقة.",
+  "NSLocationWhenInUseUsageDescription": "لعرض المحلات القريبة منك فقط عند طلبك ذلك.",
+  "NSFaceIDUsageDescription": "لقفل عرض بطاقتك إن فعّلت ذلك."
+}
