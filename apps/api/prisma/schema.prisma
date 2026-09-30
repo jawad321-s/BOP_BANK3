@@ -1,0 +1,806 @@
+// Bitaqati data model. Money is stored as integer minor units (agorot); rates as basis points.
+// Additional constraints (partial unique indexes, CHECKs, immutability triggers) live in
+// hand-written SQL inside migrations — see prisma/migrations/*/migration.sql.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum PhotoStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum EmailTokenPurpose {
+  VERIFY_EMAIL
+  RESET_PASSWORD
+  CHANGE_EMAIL
+}
+
+enum InvitationKind {
+  MERCHANT_OWNER
+  MERCHANT_STAFF
+  ADMIN
+}
+
+enum MerchantRole {
+  OWNER
+  STAFF
+}
+
+enum EntityStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+enum CardStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+  REVOKED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+}
+
+enum OfferStatus {
+  ACTIVE
+  SUPERSEDED
+  INACTIVE
+}
+
+enum VerificationMethod {
+  QR
+  MANUAL
+}
+
+enum VerificationStatus {
+  AWAITING_USER
+  PENDING_MATCH
+  MATCHED
+  MISMATCHED
+  DECLINED
+  COMPLETED
+  CANCELLED
+}
+
+enum QuoteStatus {
+  AWAITING_APPROVAL
+  APPROVED
+  REJECTED
+  SUPERSEDED
+  EXPIRED
+  CONSUMED
+}
+
+enum ApprovalDecision {
+  APPROVED
+  REJECTED
+}
+
+enum RedemptionStatus {
+  CONFIRMED
+  VOIDED
+}
+
+enum RedemptionEventType {
+  CONFIRMED
+  VOIDED
+}
+
+enum DeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+  SIMULATED
+}
+
+enum BroadcastStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  CANCELLED
+}
+
+enum DeletionStatus {
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id              String     @id @default(uuid()) @db.Uuid
+  email           String     @unique
+  passwordHash    String     @map("password_hash")
+  emailVerifiedAt DateTime?  @map("email_verified_at")
+  status          UserStatus @default(ACTIVE)
+  statusReason    String?    @map("status_reason")
+  locale          String     @default("ar")
+  mfaSecretEnc    String?    @map("mfa_secret_enc")
+  mfaEnabledAt    DateTime?  @map("mfa_enabled_at")
+  mfaRecoveryHashes String[] @map("mfa_recovery_hashes")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+  deletedAt       DateTime?  @map("deleted_at")
+
+  profile           UserProfile?
+  adminPermissions  AdminPermissionGrant[]
+  sessions          Session[]
+  emailTokens       EmailToken[]
+  memberships       MerchantMembership[]
+  cards             Card[]
+  subscriptions     Subscription[]
+  redemptions       Redemption[]           @relation("RedemptionUser")
+  staffRedemptions  Redemption[]           @relation("RedemptionStaff")
+  notifications     Notification[]
+  notificationPrefs NotificationPreference?
+  pushTokens        DevicePushToken[]
+  approvals         UserApproval[]
+  deletionRequests  AccountDeletionRequest[]
+
+  @@index([createdAt])
+  @@map("users")
+}
+
+model UserProfile {
+  userId            String      @id @map("user_id") @db.Uuid
+  fullName          String      @map("full_name")
+  phone             String?
+  city              String?
+  photoKey          String?     @map("photo_key")
+  pendingPhotoKey   String?     @map("pending_photo_key")
+  photoStatus       PhotoStatus @default(NONE) @map("photo_status")
+  photoRejectReason String?     @map("photo_reject_reason")
+  photoReviewedById String?     @map("photo_reviewed_by_id") @db.Uuid
+  photoReviewedAt   DateTime?   @map("photo_reviewed_at")
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([photoStatus])
+  @@map("user_profiles")
+}
+
+/// Admin permissions (RBAC). A user holding any grant has the ADMIN role.
+model AdminPermissionGrant {
+  userId      String   @map("user_id") @db.Uuid
+  permission  String
+  grantedById String?  @map("granted_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permission])
+  @@map("admin_permission_grants")
+}
+
+/// A device login. Refresh tokens rotate within a session; reuse of a rotated token revokes the session.
+model Session {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  deviceName    String?   @map("device_name")
+  platform      String?
+  ip            String?
+  userAgent     String?   @map("user_agent")
+  mfaVerifiedAt DateTime? @map("mfa_verified_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  lastUsedAt    DateTime  @default(now()) @map("last_used_at")
+  expiresAt     DateTime  @map("expires_at")
+  revokedAt     DateTime? @map("revoked_at")
+  revokeReason  String?   @map("revoke_reason")
+
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+  qrTokens      QrToken[]
+  pushTokens    DevicePushToken[]
+
+  @@index([userId, revokedAt])
+  @@map("sessions")
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  sessionId  String    @map("session_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  expiresAt  DateTime  @map("expires_at")
+  rotatedAt  DateTime? @map("rotated_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("refresh_tokens")
+}
+
+model EmailToken {
+  id        String            @id @default(uuid()) @db.Uuid
+  userId    String            @map("user_id") @db.Uuid
+  purpose   EmailTokenPurpose
+  tokenHash String            @unique @map("token_hash")
+  newEmail  String?           @map("new_email")
+  expiresAt DateTime          @map("expires_at")
+  usedAt    DateTime?         @map("used_at")
+  createdAt DateTime          @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@map("email_tokens")
+}
+
+model Invitation {
+  id               String         @id @default(uuid()) @db.Uuid
+  email            String
+  kind             InvitationKind
+  merchantId       String?        @map("merchant_id") @db.Uuid
+  storeId          String?        @map("store_id") @db.Uuid
+  branchIds        String[]       @map("branch_ids") @db.Uuid
+  permissions      String[]
+  tokenHash        String         @unique @map("token_hash")
+  invitedById      String         @map("invited_by_id") @db.Uuid
+  expiresAt        DateTime       @map("expires_at")
+  acceptedAt       DateTime?      @map("accepted_at")
+  acceptedByUserId String?        @map("accepted_by_user_id") @db.Uuid
+  revokedAt        DateTime?      @map("revoked_at")
+  createdAt        DateTime       @default(now()) @map("created_at")
+
+  merchant Merchant? @relation(fields: [merchantId], references: [id])
+
+  @@index([email])
+  @@map("invitations")
+}
+
+model Merchant {
+  id           String       @id @default(uuid()) @db.Uuid
+  nameAr       String       @map("name_ar")
+  nameEn       String       @map("name_en")
+  legalName    String?      @map("legal_name")
+  contactEmail String?      @map("contact_email")
+  contactPhone String?      @map("contact_phone")
+  status       EntityStatus @default(PENDING)
+  statusReason String?      @map("status_reason")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  stores      Store[]
+  memberships MerchantMembership[]
+  invitations Invitation[]
+
+  @@map("merchants")
+}
+
+model MerchantMembership {
+  id         String       @id @default(uuid()) @db.Uuid
+  userId     String       @map("user_id") @db.Uuid
+  merchantId String       @map("merchant_id") @db.Uuid
+  role       MerchantRole
+  active     Boolean      @default(true)
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime     @updatedAt @map("updated_at")
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  merchant Merchant           @relation(fields: [merchantId], references: [id])
+  branches MembershipBranch[]
+
+  @@unique([userId, merchantId])
+  @@index([merchantId])
+  @@map("merchant_memberships")
+}
+
+/// Branch assignments for staff. Owners implicitly access every branch of their merchant.
+model MembershipBranch {
+  membershipId String @map("membership_id") @db.Uuid
+  branchId     String @map("branch_id") @db.Uuid
+
+  membership MerchantMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  branch     Branch             @relation(fields: [branchId], references: [id])
+
+  @@id([membershipId, branchId])
+  @@index([branchId])
+  @@map("membership_branches")
+}
+
+model Category {
+  id        String  @id @default(uuid()) @db.Uuid
+  slug      String  @unique
+  nameAr    String  @map("name_ar")
+  nameEn    String  @map("name_en")
+  sortOrder Int     @default(0) @map("sort_order")
+  stores    Store[]
+
+  @@map("categories")
+}
+
+/// A store is the unit of the daily limit: one confirmed redemption per user per store per business day, across all its branches.
+model Store {
+  id            String       @id @default(uuid()) @db.Uuid
+  merchantId    String       @map("merchant_id") @db.Uuid
+  categoryId    String?      @map("category_id") @db.Uuid
+  nameAr        String       @map("name_ar")
+  nameEn        String       @map("name_en")
+  descriptionAr String       @default("") @map("description_ar")
+  descriptionEn String       @default("") @map("description_en")
+  logoKey       String?      @map("logo_key")
+  phone         String?
+  website       String?
+  instagram     String?
+  status        EntityStatus @default(PENDING)
+  statusReason  String?      @map("status_reason")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  merchant      Merchant             @relation(fields: [merchantId], references: [id])
+  category      Category?            @relation(fields: [categoryId], references: [id])
+  branches      Branch[]
+  images        StoreImage[]
+  offers        DiscountOffer[]
+  redemptions   Redemption[]
+  verifications VerificationSession[]
+
+  @@index([merchantId])
+  @@index([status, categoryId])
+  @@map("stores")
+}
+
+model StoreImage {
+  id        String   @id @default(uuid()) @db.Uuid
+  storeId   String   @map("store_id") @db.Uuid
+  key       String
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId])
+  @@map("store_images")
+}
+
+model Branch {
+  id           String       @id @default(uuid()) @db.Uuid
+  storeId      String       @map("store_id") @db.Uuid
+  nameAr       String       @map("name_ar")
+  nameEn       String       @map("name_en")
+  city         String
+  addressAr    String       @default("") @map("address_ar")
+  addressEn    String       @default("") @map("address_en")
+  lat          Float?
+  lng          Float?
+  phone        String?
+  openingHours Json         @default("[]") @map("opening_hours")
+  status       EntityStatus @default(ACTIVE)
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  store         Store                 @relation(fields: [storeId], references: [id])
+  staff         MembershipBranch[]
+  redemptions   Redemption[]
+  verifications VerificationSession[]
+
+  @@index([storeId])
+  @@index([city])
+  @@map("branches")
+}
+
+/// Versioned discount offer. Changing terms supersedes the active version; history is kept.
+model DiscountOffer {
+  id               String      @id @default(uuid()) @db.Uuid
+  storeId          String      @map("store_id") @db.Uuid
+  version          Int
+  rateBps          Int         @map("rate_bps")
+  minEligibleMinor Int?        @map("min_eligible_minor")
+  maxDiscountMinor Int?        @map("max_discount_minor")
+  termsAr          String      @default("") @map("terms_ar")
+  termsEn          String      @default("") @map("terms_en")
+  status           OfferStatus @default(ACTIVE)
+  createdById      String?     @map("created_by_id") @db.Uuid
+  createdAt        DateTime    @default(now()) @map("created_at")
+  supersededAt     DateTime?   @map("superseded_at")
+
+  store       Store           @relation(fields: [storeId], references: [id])
+  quotes      DiscountQuote[]
+  redemptions Redemption[]
+
+  @@unique([storeId, version])
+  @@map("discount_offers")
+}
+
+model Plan {
+  id            String         @id @default(uuid()) @db.Uuid
+  code          String         @unique
+  nameAr        String         @map("name_ar")
+  nameEn        String         @map("name_en")
+  durationDays  Int            @map("duration_days")
+  priceMinor    Int            @map("price_minor")
+  active        Boolean        @default(true)
+  createdAt     DateTime       @default(now()) @map("created_at")
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id               String             @id @default(uuid()) @db.Uuid
+  userId           String             @map("user_id") @db.Uuid
+  planId           String             @map("plan_id") @db.Uuid
+  startsAt         DateTime           @map("starts_at")
+  endsAt           DateTime           @map("ends_at")
+  status           SubscriptionStatus @default(ACTIVE)
+  source           String             @default("ADMIN_MANUAL")
+  paymentReference String?            @map("payment_reference")
+  reason           String
+  createdById      String?            @map("created_by_id") @db.Uuid
+  cancelledAt      DateTime?          @map("cancelled_at")
+  cancelledById    String?            @map("cancelled_by_id") @db.Uuid
+  cancelReason     String?            @map("cancel_reason")
+  createdAt        DateTime           @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan Plan @relation(fields: [planId], references: [id])
+
+  @@index([userId, status, endsAt])
+  @@index([endsAt])
+  @@map("subscriptions")
+}
+
+model Card {
+  id           String     @id @default(uuid()) @db.Uuid
+  userId       String     @map("user_id") @db.Uuid
+  serialNumber String     @unique @map("serial_number")
+  status       CardStatus @default(PENDING)
+  statusReason String?    @map("status_reason")
+  isCurrent    Boolean    @default(true) @map("is_current")
+  replacedById String?    @map("replaced_by_id") @db.Uuid
+  issuedAt     DateTime   @default(now()) @map("issued_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  qrTokens      QrToken[]
+  verifications VerificationSession[]
+  redemptions   Redemption[]
+
+  @@index([userId])
+  @@map("cards")
+}
+
+/// Short-lived QR tokens. Only a SHA-256 hash is stored; the raw token never touches the DB or logs.
+model QrToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  cardId    String    @map("card_id") @db.Uuid
+  sessionId String    @map("session_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  card    Card    @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([cardId, expiresAt])
+  @@map("qr_tokens")
+}
+
+model VerificationSession {
+  id              String             @id @default(uuid()) @db.Uuid
+  cardId          String             @map("card_id") @db.Uuid
+  userId          String             @map("user_id") @db.Uuid
+  merchantId      String             @map("merchant_id") @db.Uuid
+  storeId         String             @map("store_id") @db.Uuid
+  branchId        String             @map("branch_id") @db.Uuid
+  staffUserId     String             @map("staff_user_id") @db.Uuid
+  method          VerificationMethod
+  status          VerificationStatus
+  expiresAt       DateTime           @map("expires_at")
+  userConfirmedAt DateTime?          @map("user_confirmed_at")
+  matchedAt       DateTime?          @map("matched_at")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+
+  card   Card            @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  store  Store           @relation(fields: [storeId], references: [id])
+  branch Branch          @relation(fields: [branchId], references: [id])
+  quotes DiscountQuote[]
+
+  @@index([userId, status])
+  @@index([staffUserId, createdAt])
+  @@map("verification_sessions")
+}
+
+/// Server-computed discount quote with a snapshot of the offer terms. The merchant never supplies the rate.
+model DiscountQuote {
+  id             String      @id @default(uuid()) @db.Uuid
+  verificationId String      @map("verification_id") @db.Uuid
+  userId         String      @map("user_id") @db.Uuid
+  storeId        String      @map("store_id") @db.Uuid
+  branchId       String      @map("branch_id") @db.Uuid
+  staffUserId    String      @map("staff_user_id") @db.Uuid
+  offerId        String      @map("offer_id") @db.Uuid
+  offerVersion   Int         @map("offer_version")
+  rateBps        Int         @map("rate_bps")
+  grossMinor     Int         @map("gross_minor")
+  eligibleMinor  Int         @map("eligible_minor")
+  eligibleReason String?     @map("eligible_reason")
+  discountMinor  Int         @map("discount_minor")
+  netMinor       Int         @map("net_minor")
+  capped         Boolean     @default(false)
+  currency       String      @default("ILS")
+  termsSnapshot  Json        @map("terms_snapshot")
+  fingerprint    String
+  status         QuoteStatus @default(AWAITING_APPROVAL)
+  expiresAt      DateTime    @map("expires_at")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  verification VerificationSession @relation(fields: [verificationId], references: [id], onDelete: Cascade)
+  offer        DiscountOffer       @relation(fields: [offerId], references: [id])
+  approval     UserApproval?
+  redemption   Redemption?
+
+  @@index([verificationId])
+  @@index([userId, status])
+  @@map("discount_quotes")
+}
+
+model UserApproval {
+  id          String           @id @default(uuid()) @db.Uuid
+  quoteId     String           @unique @map("quote_id") @db.Uuid
+  userId      String           @map("user_id") @db.Uuid
+  sessionId   String           @map("session_id") @db.Uuid
+  decision    ApprovalDecision
+  fingerprint String
+  usedAt      DateTime?        @map("used_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  quote DiscountQuote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_approvals")
+}
+
+/// Confirmed use of a discount. Historical snapshot; never rewritten by later offer changes.
+/// Daily limit enforced by a partial unique index on (user_id, store_id, business_date) WHERE status = 'CONFIRMED'.
+model Redemption {
+  id             String           @id @default(uuid()) @db.Uuid
+  ref            String           @unique
+  userId         String           @map("user_id") @db.Uuid
+  cardId         String           @map("card_id") @db.Uuid
+  merchantId     String           @map("merchant_id") @db.Uuid
+  storeId        String           @map("store_id") @db.Uuid
+  branchId       String           @map("branch_id") @db.Uuid
+  offerId        String           @map("offer_id") @db.Uuid
+  offerVersion   Int              @map("offer_version")
+  staffUserId    String           @map("staff_user_id") @db.Uuid
+  quoteId        String           @unique @map("quote_id") @db.Uuid
+  verificationId String           @map("verification_id") @db.Uuid
+  businessDate   DateTime         @map("business_date") @db.Date
+  timezone       String
+  grossMinor     Int              @map("gross_minor")
+  eligibleMinor  Int              @map("eligible_minor")
+  eligibleReason String?          @map("eligible_reason")
+  rateBps        Int              @map("rate_bps")
+  discountMinor  Int              @map("discount_minor")
+  netMinor       Int              @map("net_minor")
+  currency       String           @default("ILS")
+  termsSnapshot  Json             @map("terms_snapshot")
+  storeNameAr    String           @map("store_name_ar")
+  storeNameEn    String           @map("store_name_en")
+  branchNameAr   String           @map("branch_name_ar")
+  branchNameEn   String           @map("branch_name_en")
+  status         RedemptionStatus @default(CONFIRMED)
+  confirmedAt    DateTime         @map("confirmed_at")
+  voidedAt       DateTime?        @map("voided_at")
+  voidedById     String?          @map("voided_by_id") @db.Uuid
+  voidReason     String?          @map("void_reason")
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  user   User              @relation("RedemptionUser", fields: [userId], references: [id])
+  staff  User              @relation("RedemptionStaff", fields: [staffUserId], references: [id])
+  card   Card              @relation(fields: [cardId], references: [id])
+  store  Store             @relation(fields: [storeId], references: [id])
+  branch Branch            @relation(fields: [branchId], references: [id])
+  offer  DiscountOffer     @relation(fields: [offerId], references: [id])
+  quote  DiscountQuote     @relation(fields: [quoteId], references: [id])
+  events RedemptionEvent[]
+
+  @@index([userId, confirmedAt])
+  @@index([storeId, businessDate])
+  @@index([branchId, businessDate])
+  @@index([merchantId, businessDate])
+  @@index([businessDate, status])
+  @@map("redemptions")
+}
+
+/// Append-only event log for redemptions (UPDATE/DELETE blocked by trigger).
+model RedemptionEvent {
+  id           String              @id @default(uuid()) @db.Uuid
+  redemptionId String              @map("redemption_id") @db.Uuid
+  type         RedemptionEventType
+  actorUserId  String?             @map("actor_user_id") @db.Uuid
+  reason       String?
+  data         Json                @default("{}")
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  redemption Redemption @relation(fields: [redemptionId], references: [id])
+
+  @@index([redemptionId])
+  @@map("redemption_events")
+}
+
+model IdempotencyRecord {
+  id             String   @id @default(uuid()) @db.Uuid
+  actorUserId    String   @map("actor_user_id") @db.Uuid
+  route          String
+  key            String
+  requestHash    String   @map("request_hash")
+  responseStatus Int      @map("response_status")
+  responseBody   Json     @map("response_body")
+  createdAt      DateTime @default(now()) @map("created_at")
+  expiresAt      DateTime @map("expires_at")
+
+  @@unique([actorUserId, route, key])
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  type      String
+  data      Json      @default("{}")
+  titleAr   String    @map("title_ar")
+  titleEn   String    @map("title_en")
+  bodyAr    String    @map("body_ar")
+  bodyEn    String    @map("body_en")
+  dedupeKey String    @unique @map("dedupe_key")
+  readAt    DateTime? @map("read_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries NotificationDelivery[]
+
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+/// Record of each push attempt. SIMULATED is only possible outside production and is never reported as SENT.
+model NotificationDelivery {
+  id             String         @id @default(uuid()) @db.Uuid
+  notificationId String         @map("notification_id") @db.Uuid
+  pushTokenId    String?        @map("push_token_id") @db.Uuid
+  channel        String         @default("push")
+  status         DeliveryStatus @default(PENDING)
+  attempts       Int            @default(0)
+  providerRef    String?        @map("provider_ref")
+  lastError      String?        @map("last_error")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@unique([notificationId, pushTokenId])
+  @@map("notification_deliveries")
+}
+
+model NotificationPreference {
+  userId          String   @id @map("user_id") @db.Uuid
+  marketing       Boolean  @default(false)
+  dailySummary    Boolean  @default(false) @map("daily_summary")
+  expiryReminders Boolean  @default(true) @map("expiry_reminders")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
+}
+
+model DevicePushToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  sessionId  String?   @map("session_id") @db.Uuid
+  token      String    @unique
+  platform   String
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at")
+  disabledAt DateTime? @map("disabled_at")
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@map("device_push_tokens")
+}
+
+model Broadcast {
+  id             String          @id @default(uuid()) @db.Uuid
+  titleAr        String          @map("title_ar")
+  titleEn        String          @map("title_en")
+  bodyAr         String          @map("body_ar")
+  bodyEn         String          @map("body_en")
+  audience       Json
+  marketing      Boolean         @default(true)
+  status         BroadcastStatus @default(DRAFT)
+  scheduledAt    DateTime?       @map("scheduled_at")
+  sentAt         DateTime?       @map("sent_at")
+  recipientCount Int?            @map("recipient_count")
+  createdById    String          @map("created_by_id") @db.Uuid
+  createdAt      DateTime        @default(now()) @map("created_at")
+
+  @@index([status, scheduledAt])
+  @@map("broadcasts")
+}
+
+/// Append-only audit trail (UPDATE/DELETE blocked by trigger).
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    String?  @map("entity_id")
+  reason      String?
+  before      Json?
+  after       Json?
+  requestId   String?  @map("request_id")
+  ip          String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([entityType, entityId])
+  @@index([actorUserId, createdAt])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// Transactional outbox. Rows are written in the same transaction as the business change.
+model OutboxEvent {
+  id          String    @id @default(uuid()) @db.Uuid
+  type        String
+  payload     Json
+  dedupeKey   String    @unique @map("dedupe_key")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+  availableAt DateTime  @default(now()) @map("available_at")
+  processedAt DateTime? @map("processed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([processedAt, availableAt])
+  @@map("outbox_events")
+}
+
+model AccountDeletionRequest {
+  id          String         @id @default(uuid()) @db.Uuid
+  userId      String         @map("user_id") @db.Uuid
+  status      DeletionStatus
+  requestedAt DateTime       @default(now()) @map("requested_at")
+  completedAt DateTime?      @map("completed_at")
+  details     Json           @default("{}")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("account_deletion_requests")
+}
+
+model AppSetting {
+  key         String   @id
+  value       Json
+  updatedById String?  @map("updated_by_id") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
